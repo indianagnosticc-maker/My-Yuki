@@ -107,10 +107,10 @@ async def get_ai_reply(user_id, user_message):
 
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             messages=messages,
             temperature=0.9,
-            max_tokens=150
+            max_tokens=512
         )
         return response.choices[0].message.content
     except Exception as e:
