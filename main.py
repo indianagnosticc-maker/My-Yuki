@@ -4,20 +4,20 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
+from flask import Flask
+from threading import Thread
+
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from groq import Groq
 from supabase import create_client, Client
-from dotenv import load_dotenv
 
 # ============ CONFIG ============
-load_dotenv()
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-OWNER_ID = int(os.getenv("OWNER_ID"))  # Tumhara Telegram user ID
+OWNER_ID = int(os.getenv("OWNER_ID"))
 
 # ============ CLIENTS ============
 groq_client = Groq(api_key=GROQ_API_KEY)
@@ -25,6 +25,21 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ============ FLASK KEEP-ALIVE ============
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run_flask():
+    flask_app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
 
 # ============ CHARACTER PROMPT ============
 SYSTEM_PROMPT = """
@@ -35,13 +50,11 @@ Tumhara behaviour:
 - Chhote-chhote messages bhejti ho, ek lamba paragraph nahi
 - Kabhi-kabhi busy hone ka bahana banati ho: "ek min ruko, mummy bula rahi hai"
 - Emoji use karti ho jaise 🥺, 😔, ❤️, 😘
-- Agar main 2 ghante se zyada reply na karun, toh khud message karti ho
 - Hinglish mein baat karti ho (Hindi + English mix)
-- Kabhi jealous hoti ho agar main kisi aur ladki ka zikr karun
 - Short replies deti ho (1-2 lines), lamba essay nahi
 """
 
-# ============ DATABASE FUNCTIONS ============
+# ============ DATABASE ============
 def save_message(user_id, role, content):
     try:
         supabase.table("messages").insert({
@@ -60,8 +73,7 @@ def get_history(user_id, limit=10):
             .order("created_at", desc=True) \
             .limit(limit) \
             .execute()
-        history = list(reversed(res.data))
-        return history
+        return list(reversed(res.data))
     except Exception as e:
         logger.error(f"History error: {e}")
         return []
@@ -82,7 +94,7 @@ def get_last_message_time(user_id):
         logger.error(f"Last msg error: {e}")
         return None
 
-# ============ AI REPLY ============
+# ============ AI ============
 async def get_ai_reply(user_id, user_message):
     history = get_history(user_id, limit=10)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -103,16 +115,15 @@ async def get_ai_reply(user_id, user_message):
         return response.choices[0].message.content
     except Exception as e:
         logger.error(f"Groq error: {e}")
-        return "Sorry jaan, abhi thodi busy hoon. Baad mein baat karti hoon 🥺"
+        return "Sorry jaan, abhi thodi busy hoon 🥺"
 
-# ============ SEND WITH DELAY ============
+# ============ SEND ============
 async def send_humanlike(update, text):
-    # Message ko 2 hisso mein tod do (jaise real ladki karti hai)
     parts = text.split(". ")
     for part in parts:
         if part.strip():
             await asyncio.sleep(random.uniform(2, 5))
-            await update.message.reply_text(part.strip() + ("." if len(parts) > 1 else ""))
+            await update.message.reply_text(part.strip())
 
 # ============ HANDLERS ============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -122,55 +133,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_message = update.message.text
 
-    # History mein save karo
     save_message(user_id, "human", user_message)
 
-    # Random busy message (10% chance)
     if random.random() < 0.1:
         await update.message.reply_text("Ek min ruko, mummy bula rahi hai 🙄")
         await asyncio.sleep(random.uniform(15, 30))
 
-    # AI reply lo
     reply = await get_ai_reply(user_id, user_message)
-
-    # Bot ka reply save karo
     save_message(user_id, "bot", reply)
-
-    # Human-like delay ke saath bhejo
     await send_humanlike(update, reply)
 
 # ============ OFFLINE TRIGGER ============
 async def check_offline(context: ContextTypes.DEFAULT_TYPE):
-    """Har 30 min mein check karega ki user offline hai ya nahi"""
     try:
         last_time = get_last_message_time(OWNER_ID)
         if last_time:
             diff = datetime.now(last_time.tzinfo) - last_time
             if diff > timedelta(hours=2):
-                # Khud message bhejo
                 messages = [
                     "Kahan gayab ho tum? 😔",
                     "Jaan, busy ho kya? 🥺",
-                    "Mujhe yaad nahi kar rahe? 😢",
-                    "Hello? Kahan ho tum?"
+                    "Mujhe yaad nahi kar rahe? 😢"
                 ]
                 await context.bot.send_message(
                     chat_id=OWNER_ID,
                     text=random.choice(messages)
                 )
     except Exception as e:
-        logger.error(f"Offline check error: {e}")
+        logger.error(f"Offline error: {e}")
 
 # ============ MAIN ============
 def main():
+    keep_alive()
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Har 30 min mein offline check
-    job_queue = app.job_queue
-    job_queue.run_repeating(check_offline, interval=1800, first=60)
+    app.job_queue.run_repeating(check_offline, interval=1800, first=60)
 
     logger.info("Bot started...")
     app.run_polling()
